@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <windows.h>
+#include <omp.h>
 
 #define k (30)
 
@@ -88,11 +89,19 @@ int find_center(DataSet &b) {
 
 /* 分類所有資料屬於哪個中心(計算距離) */
 void classify_datas() {
+	/*** omp_lock ***/
+	omp_lock_t lock;
+	omp_init_lock(&lock);
+	#pragma omp parallel for
 	for(int i = 0; i < datas.size(); i++) {
 		int center_number = find_center(datas[i]);
+		
+		omp_set_lock(&lock);
 		clusters[center_number].push_back(datas[i]);
 		data_number[center_number].push_back(i);
+		omp_unset_lock(&lock);
 	}
+	omp_destroy_lock(&lock);
 }
 
 /* 重新計算叢集中心 */
@@ -132,7 +141,7 @@ void calculate_centers() {
 
 int main() {
 	//srand(time(NULL));
-	freopen("out","w",stdout);
+	freopen("out1","w",stdout);
 	
 	read_datas();
 	//rand_datas();

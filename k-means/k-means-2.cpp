@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <windows.h>
+#include <omp.h>
 
 #define k (30)
 
@@ -88,10 +89,25 @@ int find_center(DataSet &b) {
 
 /* 分類所有資料屬於哪個中心(計算距離) */
 void classify_datas() {
+	/*** 每一thread分成k群MEMORY(DUPLICATE) 各自做各自的push_back ***/
+	int max_threads = omp_get_max_threads();
+	std::vector<DataSet> temp_clusters[max_threads][k];
+	std::vector<int> temp_data_number[max_threads][k];
+	#pragma omp parallel for
 	for(int i = 0; i < datas.size(); i++) {
 		int center_number = find_center(datas[i]);
-		clusters[center_number].push_back(datas[i]);
-		data_number[center_number].push_back(i);
+		int tid = omp_get_thread_num();
+		temp_clusters[tid][center_number].push_back(datas[i]);
+		temp_data_number[tid][center_number].push_back(i);
+	}
+	/*** MERGE ***/
+	for(int i = 0; i < max_threads; i++) {
+		for(int j = 0; j < k; j++) {
+			for(int m = 0; m < temp_clusters[i][j].size(); m++) {
+				clusters[j].push_back(temp_clusters[i][j][m]);
+				data_number[j].push_back(temp_data_number[i][j][m]);
+			}
+		}
 	}
 }
 
@@ -132,7 +148,7 @@ void calculate_centers() {
 
 int main() {
 	//srand(time(NULL));
-	freopen("out","w",stdout);
+	freopen("out2","w",stdout);
 	
 	read_datas();
 	//rand_datas();
