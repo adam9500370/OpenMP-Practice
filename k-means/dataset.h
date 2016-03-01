@@ -4,6 +4,7 @@
 class DataSet {
 public:
 	double vector[DIM];
+	int id;
 	double distance(const DataSet &b) const {
 		double sum = 0;
 		for(int i = 0; i < DIM; i++) {
@@ -11,6 +12,9 @@ public:
 			sum += d*d; // 2-norm
 		}
 		return sum;
+	}
+	double distance(const DataSet *b) const {
+		return distance(*b);
 	}
 };
 #endif
