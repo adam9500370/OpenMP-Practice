@@ -10,30 +10,28 @@
 #include "time.h"
 #include <omp.h>
 
-Queue_Base* current_queue;
-std::vector<Queue_Base*> next_queues;
-std::vector<bool> thread_visited, visited;
+std::vector<int> merge_queue;
+std::vector<Queue_Base*> current_queues, next_queues;
+std::vector<bool> visited;
 std::vector<std::vector<int> > adjacency_list;
 std::vector<int> node_level;
 
 std::vector<int> next_queue_size, current_queue_size;
 
 int max_threads = omp_get_max_threads();
+bool flag_merge;
 
 void initialize(int N) {	
 	visited = std::vector<bool> (N);
-	thread_visited = std::vector<bool> (N);
 	adjacency_list = std::vector<std::vector<int> > (N);
 	node_level = std::vector<int> (N, -1);
 	
-	current_queue = new Circular_Queue;
-	current_queue->clear();
-	current_queue->reserve(N + 1);
-	/*for(int i = 0; i < current_queue.size(); i++) {
-		current_queue[i] = new Circular_Queue;
-		current_queue[i]->clear();
-		current_queue[i]->reserve(N + 1);		
-	}*/
+	current_queues = std::vector<Queue_Base*> (max_threads);
+	for(int i = 0; i < current_queues.size(); i++) {
+		current_queues[i] = new Circular_Queue;
+		current_queues[i]->clear();
+		current_queues[i]->reserve(N + 1);		
+	}
 	next_queues = std::vector<Queue_Base*> (max_threads);
 	for(int i = 0; i < next_queues.size(); i++) {
 		next_queues[i] = new Circular_Queue;
@@ -95,90 +93,118 @@ void output_datas() {
 	}
 }
 
-/*** first current_queues top to array ***/
-void create_current_queue_array(std::vector<int> &node_array, int level) {
-	node_array.clear();
-	node_array.reserve(next_queue_size[level-1]);
-	//for(int i = 0; i < max_threads; i++) {
-		while(!current_queue->empty()) {
-			/* current_queue top & pop */
-			node_array.push_back(current_queue->top());
-			current_queue->pop();
+/*** find next_queues elements, each thread maintain their own next queue, directly divide merge queue ***/
+void find_next_queues_by_merge_queue(int level) {
+	#pragma omp parallel for
+	for(int i = 0; i < merge_queue.size(); i++) {
+		if(node_level[merge_queue[i]] < 0) {
+			node_level[merge_queue[i]] = level-1;
 		}
-	//}
+		for(int j = 0; j < adjacency_list[merge_queue[i]].size(); j++) {
+			if(!visited[adjacency_list[merge_queue[i]][j]]) {
+				visited[adjacency_list[merge_queue[i]][j]] = true;
+				next_queues[ omp_get_thread_num() ]->push(adjacency_list[merge_queue[i]][j]);
+			}
+		}
+	}
 }
 
-/* find next_queue elements */
-/*** each thread maintain their own queue ***/
-void find_next_queue(const std::vector<int> &node_array, int level) {
+/*** find next_queues elements, each thread maintain their own current and next queue ***/
+void find_next_queues_by_current_queues(int level) {
 	#pragma omp parallel for
-	for(int i = 0; i < node_array.size(); i++) {
-		for(int j = 0; j < adjacency_list[node_array[i]].size(); j++) {
-			if(!visited[adjacency_list[node_array[i]][j]]) {
-			//if(node_level[adjacency_list[node_array[i]][j]] == -1) {
-				visited[adjacency_list[node_array[i]][j]] = true;
-				//node_level[adjacency_list[node_array[i]][j]] = level;
-				int tid = omp_get_thread_num();
-				next_queues[tid]->push(adjacency_list[node_array[i]][j]);
+	for(int i = 0; i < max_threads; i++) {
+		int queue_size = current_queues[i]->size();
+		for(int j = 0; j < queue_size; j++) {
+			int node = current_queues[i]->top();
+			
+			if(node_level[node] < 0) {
+				node_level[node] = level-1;
 			}
+			for(int j = 0; j < adjacency_list[node].size(); j++) {
+				if(!visited[adjacency_list[node][j]]) {
+					visited[adjacency_list[node][j]] = true;
+					next_queues[i]->push(adjacency_list[node][j]);
+				}
+			}
+			
+			current_queues[i]->pop();
+		}
+	}
+}
+
+/*** record each next queue size, and determine whether to merge or not ***/
+void record_next_queues_size(int level) {
+	next_queue_size[level] = 0;
+	flag_merge = false;
+	//printf("level %d next_queues size: ", level);
+	for(int i = 0; i < max_threads; i++) {
+		next_queue_size[level] += next_queues[i]->size();
+		if(next_queues[i]->size() == 0) {
+			flag_merge = true;
+		}
+		//printf("%d ",next_queues[i]->size());
+	}
+	//printf(", sum = %d\n", next_queue_size[level]);
+	
+	int average_size = next_queue_size[level]/max_threads;
+	for(int i = 0; i < max_threads; i++) {
+		if(next_queues[i]->size() < average_size/2) {
+			flag_merge = true;
 		}
 	}
 }
 
 /*** next_queues swap to current_queues and clear ***/
-/*void swap_to_current_queue(int level) {
-	next_queue_size[level] = 0;
-	for(int i = 0; i < max_threads; i++) {
-		next_queue_size[level] += next_queues[i]->size();
-		
-		Queue_Base *tmp = current_queue[i];
-		current_queue[i] = next_queues[i];
+void swap_to_current_queues(int level) {
+	for(int i = 0; i < max_threads; i++) {		
+		Queue_Base *tmp = current_queues[i];
+		current_queues[i] = next_queues[i];
 		next_queues[i] = tmp;
 		next_queues[i]->clear();
 	}
-}*/
+}
 
-/*** next_queues merge to current_queue and clear ***/
-void merge_to_current_queue(int level) {
-	next_queue_size[level] = 0;
+/*** next_queues merge to merge_queue and clear ***/
+void merge_to_merge_queue(int level) {	
+	merge_queue.clear();
+	merge_queue.reserve(next_queue_size[level]);
 	for(int i = 0; i < max_threads; i++) {
-		next_queue_size[level] += next_queues[i]->size();
-		while(!next_queues[i]->empty()) {
+		int queue_size = next_queues[i]->size();
+		for(int j = 0; j < queue_size; j++) {
 			int node = next_queues[i]->top();
-			if(!thread_visited[node]) {
-			//if(node_level[node] == -1) {
-				thread_visited[node] = true;
-				node_level[node] = level;
-				current_queue->push(node);
-			}
+			
+			merge_queue.push_back(node);
+			
 			next_queues[i]->pop();
 		}
 		next_queues[i]->clear();
 	}
-	current_queue_size[level] = current_queue->size();
 }
 
-/*bool is_all_current_queue_empty() {
-	for(int i = 0; i < max_threads; i++) {
-		if(!current_queue[i]->empty())
-			return false;
-	}
-	return true;
-}*/
-
 void pbfs(int start_point) {
-	int level = 0;
+	int level = 1;
 	visited[start_point] = true;
-	thread_visited[start_point] = true;
-	current_queue->push(start_point);
+	merge_queue.push_back(start_point);
 	next_queue_size[0] = 1;
-	node_level[start_point] = level++;
+	flag_merge = true;
 	
-	std::vector<int> node_array;
-	while(!current_queue->empty()) {
-		create_current_queue_array(node_array, level);
-		find_next_queue(node_array, level);
-		merge_to_current_queue(level);
+	while(next_queue_size[level-1] > 0) {
+		if(flag_merge) {
+			find_next_queues_by_merge_queue(level);
+		}
+		else {
+			find_next_queues_by_current_queues(level);
+		}
+		
+		record_next_queues_size(level);
+		
+		if(flag_merge) {
+			merge_to_merge_queue(level);
+		}
+		else {
+			swap_to_current_queues(level);
+		}
+		
 		level++;
 	}
 	
