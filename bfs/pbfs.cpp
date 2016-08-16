@@ -21,7 +21,7 @@ std::vector<int> edge_list[2]; // 0 for start vertex, 1 for end vertex
 std::vector<int> in_deg;
 std::vector<int> rand_search_key, search_key;
 std::vector<int> merge_queue;
-std::vector<Queue_Base*> current_queues, next_queues;
+std::vector<Queue_Base*> next_queues;
 std::vector<bool> visited;
 std::vector<std::vector<int> > adjacency_list;
 std::vector<int> node_level, node_parent;
@@ -38,12 +38,6 @@ void initialize() {
 	adjacency_list = std::vector<std::vector<int> > (N);
 	//node_level = std::vector<int> (N, -1);
 	
-	current_queues = std::vector<Queue_Base*> (max_threads);
-	for(int i = 0; i < current_queues.size(); i++) {
-		current_queues[i] = new Circular_Queue;
-		current_queues[i]->clear();
-		current_queues[i]->reserve(N + 1);
-	}
 	next_queues = std::vector<Queue_Base*> (max_threads);
 	for(int i = 0; i < next_queues.size(); i++) {
 		next_queues[i] = new Circular_Queue;
@@ -232,60 +226,15 @@ void find_next_queues_by_merge_queue(int level) {
 	}
 }
 
-/*** find next_queues elements, each thread maintain their own current and next queue ***/
-void find_next_queues_by_current_queues(int level) {
-	#pragma omp parallel for
-	for(int i = 0; i < max_threads; i++) {
-		int queue_size = current_queues[i]->size();
-		for(int s = 0; s < queue_size; s++) {
-			int node = current_queues[i]->top();
-			
-			if(!visited[node]) {
-				for(int j = 0; j < adjacency_list[node].size(); j++) {
-					if(node_parent[adjacency_list[node][j]] < 0) {
-						node_parent[adjacency_list[node][j]] = node;
-						next_queues[i]->push(adjacency_list[node][j]);
-					}
-				}
-			}
-			visited[node] = true;
-			
-			current_queues[i]->pop();
-		}
-	}
-}
-
-/*** record each next queue size, and determine whether to merge or not ***/
+/*** record each next queue size ***/
 void record_next_queues_size(int level) {
 	next_queue_size[level] = 0;
-	flag_merge = false;
 	//printf("level %d next_queues size: ", level);
 	for(int i = 0; i < max_threads; i++) {
 		next_queue_size[level] += next_queues[i]->size();
-		if(next_queues[i]->size() == 0) {
-			flag_merge = true;
-		}
 		//printf("%d ",next_queues[i]->size());
 	}
 	//printf(", sum = %d\n", next_queue_size[level]);
-	
-	int average_size = next_queue_size[level]/max_threads;
-	for(int i = 0; i < max_threads; i++) {
-		if(next_queues[i]->size() < average_size/2) {
-			flag_merge = true;
-		}
-	}
-}
-
-/*** next_queues swap to current_queues and clear ***/
-void swap_to_current_queues(int level) {
-	#pragma omp parallel for
-	for(int i = 0; i < max_threads; i++) {
-		Queue_Base *tmp = current_queues[i];
-		current_queues[i] = next_queues[i];
-		next_queues[i] = tmp;
-		next_queues[i]->clear();
-	}
 }
 
 /*** next_queues merge to merge_queue and clear ***/
@@ -307,7 +256,7 @@ void merge_to_merge_queue(int level) {
 
 void pbfs(int start_point/*, double* time_group*/) {
 	int level = 1;
-	/*Windows_Time *timer_1 = new Windows_Time, *timer_2 = new Windows_Time, *timer_3 = new Windows_Time;
+	/*Linux_Time *timer_1 = new Linux_Time, *timer_2 = new Linux_Time, *timer_3 = new Linux_Time;
 	
 	time_group[0] = 0.0;
 	time_group[1] = 0.0;
@@ -333,24 +282,14 @@ void pbfs(int start_point/*, double* time_group*/) {
 		for(int i = 0; i < N; i++) {
 			visited[i] = false;
 		}
-		#pragma omp for nowait
-		for(int i = 0; i < max_threads; i++) {
-			current_queues[i]->clear();
-		}
 	}
 	
 	node_parent[start_point] = start_point;
 	next_queue_size[0] = 1;
-	flag_merge = true;
 	
 	while(next_queue_size[level-1] > 0) {
 		//timer_1->set_start_time();
-		if(flag_merge) {
-			find_next_queues_by_merge_queue(level);
-		}
-		else {
-			find_next_queues_by_current_queues(level);
-		}
+		find_next_queues_by_merge_queue(level);
 		/*timer_1->set_end_time();
 		time_group[0] += timer_1->get_time_interval();*/
 			
@@ -360,12 +299,7 @@ void pbfs(int start_point/*, double* time_group*/) {
 		time_group[1] += timer_2->get_time_interval();*/
 			
 		//timer_3->set_start_time();
-		if(flag_merge) {
-			merge_to_merge_queue(level);
-		}
-		else {
-			swap_to_current_queues(level);
-		}
+		merge_to_merge_queue(level);
 		/*timer_3->set_end_time();
 		time_group[2] += timer_3->get_time_interval();*/
 			
@@ -564,7 +498,7 @@ void output(int SCALE, int edgefactor, int NBFS, double kernel_1_time, double* k
 int main() {
 	int SCALE, edgefactor;
 	int NBFS = 64;
-	Windows_Time *timer_kernel_1 = new Windows_Time, *timer_kernel_2 = new Windows_Time;
+	Linux_Time *timer_kernel_1 = new Linux_Time, *timer_kernel_2 = new Linux_Time;
 	double kernel_1_time, kernel_2_time[NBFS], kernel_2_nedge[NBFS];
 	
 	printf("Please enter SCALE and edgefactor:\n");
