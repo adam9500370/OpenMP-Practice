@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <random>
 #include "queue.h"
 #include <iostream>
 #include <string>
@@ -10,6 +11,9 @@
 #include "time.h"
 #include <omp.h>
 #include <math.h>
+
+// Seed with a real random value, if available
+std::random_device r;
 
 int N, M;
 
@@ -33,9 +37,7 @@ std::vector<int> next_queue_size, current_queue_size;
 
 int max_threads/* = omp_get_max_threads()*/;
 
-void initialize() {
-	srand(time(NULL));
-	
+void initialize() {	
 	omp_set_num_threads(max_threads);
 	
 	in_deg = std::vector<int> (N);
@@ -57,8 +59,10 @@ void randperm(int n, std::vector<int> &perm) {
 		perm[i] = i;
 	}
 	
-	for(int i = 0; i < n; i++) {
-		j = ((double)rand() / (1.0 + RAND_MAX)) * (n-i) + i;
+	std::default_random_engine generator(r());
+	for(int i = 0; i < n; i++) {	
+		std::uniform_int_distribution<int> distribution(0, n-i-1);
+		j = distribution(generator) + i;
 		// swap i, j
 		tmp = perm[j];
 		perm[j] = perm[i];
@@ -67,20 +71,40 @@ void randperm(int n, std::vector<int> &perm) {
 }
 
 void rand_arr(int len, std::vector<double> &arr) {
-	for(int i = 0; i < len; i++) {
-		arr[i] = (double)(rand() % RAND_MAX) / RAND_MAX;
+	std::default_random_engine generator(r());
+	std::uniform_int_distribution<int> distribution(0, 10000);
+	#pragma omp parallel for
+	for(int i = 0; i < len; i++) {		
+		arr[i] = (double)distribution(generator) / 10000;
 	}
 }
 
 void cmp_gt(int len, const std::vector<double> &arr1, const std::vector<double> &arr2, std::vector<char> &result_arr) { // compare whether arr1 > arr2 or not
+	#pragma omp parallel for
 	for(int i = 0; i < len; i++) {
 		result_arr[i] = (arr1[i] > arr2[i]);
 	}
 }
 
 void cmp_gt(int len, const std::vector<double> &arr1, double value, std::vector<char> &result_arr) { // compare whether arr1 > value or not
+	#pragma omp parallel for
 	for(int i = 0; i < len; i++) {
 		result_arr[i] = (arr1[i] > value);
+	}
+}
+
+void calculate_norm_arr(double c_norm, double a_norm) {
+	#pragma omp parallel for
+	for(int k = 0; k < M; k++) {
+		norm_arr[k] = c_norm * ii_bit[k] + a_norm * (!ii_bit[k]);
+	}
+}
+
+void sum_tmp_edge_list(int ib) {
+	#pragma omp parallel for
+	for(int k = 0; k < M; k++) {
+		tmp_edge_list[k].x += pow(2, (ib-1)) * ii_bit[k];
+		tmp_edge_list[k].y += pow(2, (ib-1)) * jj_bit[k];
 	}
 }
 
@@ -117,14 +141,9 @@ void kronecker_generator(int SCALE, int edgefactor) {
 		rand_arr(M, ii_arr);
 		cmp_gt(M, ii_arr, ab, ii_bit);
 		rand_arr(M, jj_arr);
-		for(int k = 0; k < M; k++) {
-			norm_arr[k] = c_norm * ii_bit[k] + a_norm * (!ii_bit[k]);
-		}
+		calculate_norm_arr(c_norm, a_norm);
 		cmp_gt(M, jj_arr, norm_arr, jj_bit);
-		for(int k = 0; k < M; k++) {
-			tmp_edge_list[k].x += pow(2, (ib-1)) * ii_bit[k];
-			tmp_edge_list[k].y += pow(2, (ib-1)) * jj_bit[k];
-		}
+		sum_tmp_edge_list(ib);
 	}
 	std::vector<double> ().swap(ii_arr);
 	std::vector<double> ().swap(jj_arr);
@@ -135,6 +154,7 @@ void kronecker_generator(int SCALE, int edgefactor) {
 	// Permute vertex labels
 	p_v.reserve(N);
 	randperm(N, p_v);
+	#pragma omp parallel for
 	for(int k = 0; k < M; k++) {
 		tmp_edge_list[k].x = p_v[tmp_edge_list[k].x];
 		tmp_edge_list[k].y = p_v[tmp_edge_list[k].y];
@@ -145,6 +165,7 @@ void kronecker_generator(int SCALE, int edgefactor) {
 	edge_list = std::vector<Edge> (M);
 	p_e.reserve(M);
 	randperm(M, p_e);
+	#pragma omp parallel for
 	for(int k = 0; k < M; k++) {
 		edge_list[k].x = tmp_edge_list[p_e[k]].x;
 		edge_list[k].y = tmp_edge_list[p_e[k]].y;
@@ -170,13 +191,13 @@ void construct_graph(bool flag_bidirection) {
 	sort(edge_list.begin(), edge_list.end(), cmp_edge);
 	for(int i = 0; i < edge_list.size(); i++) {
 		if(!test_self_edge(i)) { // no self edge, no duplicate edge, undirected graph
-			in_deg[edge_list[i].y]++;
+			in_deg[edge_list[i].y]++;				
 			if(flag_bidirection) {
 				in_deg[edge_list[i].x]++;
 			}
 			
 			if(!test_duplicate_edge(i)) {
-				adjacency_list[edge_list[i].x].push_back(edge_list[i].y);				
+				adjacency_list[edge_list[i].x].push_back(edge_list[i].y);
 				if(flag_bidirection) {
 					adjacency_list[edge_list[i].y].push_back(edge_list[i].x);
 				}
