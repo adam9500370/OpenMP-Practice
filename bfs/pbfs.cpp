@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <time.h>
 #include <random>
-#include "queue.h"
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -12,8 +11,13 @@
 #include <omp.h>
 #include <math.h>
 
+#define RAND_VAL_MAX 10000
+#define FRONTIER_LIMIT 1024
+
 // Seed with a real random value, if available
 std::random_device r;
+std::default_random_engine generator(r());
+std::uniform_int_distribution<int> distribution(0, RAND_VAL_MAX);
 
 int N, M;
 
@@ -27,30 +31,25 @@ struct Edge {
 std::vector<Edge> edge_list, tmp_edge_list; // x for start vertex, y for end vertex
 std::vector<int> in_deg;
 std::vector<int> rand_search_key, search_key;
-std::vector<int> merge_queue;
-std::vector<Queue_Base*> next_queues;
-std::vector<char> visited;
+std::vector<int> frontier_level;
 std::vector<std::vector<int> > adjacency_list;
+std::vector<int> index_into_adjacency_array, adjacency_array;
 std::vector<int> node_parent;
-
-std::vector<int> next_queue_size, current_queue_size;
 
 int max_threads/* = omp_get_max_threads()*/;
 
-void initialize() {	
+void initialize() {
+	srand(time(NULL));
+	
 	omp_set_num_threads(max_threads);
 	
 	in_deg = std::vector<int> (N);
 	adjacency_list = std::vector<std::vector<int> > (N);
+	index_into_adjacency_array.reserve(N + 1);
+	adjacency_array.reserve(2 * M);	
 	
-	next_queues = std::vector<Queue_Base*> (max_threads);
-	for(int i = 0; i < next_queues.size(); i++) {
-		next_queues[i] = new Circular_Queue;
-		next_queues[i]->clear();
-		next_queues[i]->reserve(N + 1);
-	}
-	
-	next_queue_size = std::vector<int> (N);
+	frontier_level.reserve(N);
+	node_parent.reserve(N);	
 }
 
 void randperm(int n, std::vector<int> &perm) {
@@ -59,10 +58,8 @@ void randperm(int n, std::vector<int> &perm) {
 		perm[i] = i;
 	}
 	
-	std::default_random_engine generator(r());
-	for(int i = 0; i < n; i++) {	
-		std::uniform_int_distribution<int> distribution(0, n-i-1);
-		j = distribution(generator) + i;
+	for(int i = 0; i < n; i++) {
+		j = rand() % (n-i) + i;
 		// swap i, j
 		tmp = perm[j];
 		perm[j] = perm[i];
@@ -71,11 +68,9 @@ void randperm(int n, std::vector<int> &perm) {
 }
 
 void rand_arr(int len, std::vector<double> &arr) {
-	std::default_random_engine generator(r());
-	std::uniform_int_distribution<int> distribution(0, 10000);
 	#pragma omp parallel for
-	for(int i = 0; i < len; i++) {		
-		arr[i] = (double)distribution(generator) / 10000;
+	for(int i = 0; i < len; i++) {
+		arr[i] = (double)distribution(generator) / RAND_VAL_MAX;
 	}
 }
 
@@ -181,73 +176,71 @@ bool cmp_edge(const Edge &a, const Edge &b) {
 bool test_self_edge(int index) {
 	return (edge_list[index].x == edge_list[index].y);
 }
-
+/*
 bool test_duplicate_edge(int index) {
 	return ((index > 0) && (edge_list[index].x == edge_list[index-1].x) && (edge_list[index].y == edge_list[index-1].y));
 }
-
+*/
 /*** transform edge list into adjacency list ***/
 void construct_graph(bool flag_bidirection) {
-	sort(edge_list.begin(), edge_list.end(), cmp_edge);
+	std::sort(edge_list.begin(), edge_list.end(), cmp_edge);
 	for(int i = 0; i < edge_list.size(); i++) {
-		if(!test_self_edge(i)) { // no self edge, no duplicate edge, undirected graph
-			in_deg[edge_list[i].y]++;				
+		if(!test_self_edge(i)) { // no self edge, undirected graph
+			in_deg[edge_list[i].y]++;
+			adjacency_list[edge_list[i].x].push_back(edge_list[i].y);
 			if(flag_bidirection) {
 				in_deg[edge_list[i].x]++;
-			}
-			
-			if(!test_duplicate_edge(i)) {
-				adjacency_list[edge_list[i].x].push_back(edge_list[i].y);
-				if(flag_bidirection) {
-					adjacency_list[edge_list[i].y].push_back(edge_list[i].x);
-				}
+				adjacency_list[edge_list[i].y].push_back(edge_list[i].x);
 			}
 		}
 	}
+	
+	index_into_adjacency_array[0] = 0;
+	for(int i = 0; i < N; i++) {
+		index_into_adjacency_array[i + 1] = index_into_adjacency_array[i] + in_deg[i];
+		for(int j = 0; j < in_deg[i]; j++) {
+			adjacency_array[index_into_adjacency_array[i] + j] = adjacency_list[i][j];
+		}
+	}
+	std::vector<std::vector<int> > ().swap(adjacency_list);
 }
 
 /*** find next_queues elements, each thread maintain their own next queue, directly divide merge queue ***/
-void find_next_queues_by_merge_queue(int level) {
-	#pragma omp parallel for
-	for(int i = 0; i < merge_queue.size(); i++) {
-		if(!visited[merge_queue[i]]) {
-			for(int j = 0; j < adjacency_list[merge_queue[i]].size(); j++) {
-				if(node_parent[adjacency_list[merge_queue[i]][j]] < 0) {
-					node_parent[adjacency_list[merge_queue[i]][j]] = merge_queue[i];
-					next_queues[ omp_get_thread_num() ]->push(adjacency_list[merge_queue[i]][j]);
+void top_down(int level, int *frontier_count) {
+	int local_count = 0;
+	#pragma omp parallel for reduction(+ : local_count)
+	for(int i = 0; i < N; i++) {
+		if(frontier_level[i] == level) {
+			for(int j = index_into_adjacency_array[i]; j < index_into_adjacency_array[i + 1]; j++) {
+				int frontier = adjacency_array[j];
+				if(frontier_level[frontier] == 0) {
+					node_parent[frontier] = i;
+					frontier_level[frontier] = level + 1;
+					local_count++;
 				}
 			}
 		}
-		visited[merge_queue[i]] = true;
 	}
+	*frontier_count = local_count;
 }
 
-/*** record each next queue size ***/
-void record_next_queues_size(int level) {
-	next_queue_size[level] = 0;
-	//printf("level %d next_queues size: ", level);
-	for(int i = 0; i < max_threads; i++) {
-		next_queue_size[level] += next_queues[i]->size();
-		//printf("%d ",next_queues[i]->size());
-	}
-	//printf(", sum = %d\n", next_queue_size[level]);
-}
-
-/*** next_queues merge to merge_queue and clear ***/
-void merge_to_merge_queue(int level) {	
-	merge_queue.clear();
-	merge_queue.reserve(next_queue_size[level]);
-	for(int i = 0; i < max_threads; i++) {
-		int queue_size = next_queues[i]->size();
-		for(int j = 0; j < queue_size; j++) {
-			int node = next_queues[i]->top();
-			
-			merge_queue.push_back(node);
-			
-			next_queues[i]->pop();
+void buttom_up(int level, int *frontier_count) {
+	int local_count = 0;
+	#pragma omp parallel for reduction(+ : local_count)
+	for(int i = 0; i < N; i++) {
+		if(frontier_level[i] == 0) {
+			for(int j = index_into_adjacency_array[i]; j < index_into_adjacency_array[i + 1]; j++) {
+				int frontier = adjacency_array[j];
+				if(frontier_level[frontier] == level) {
+					node_parent[i] = frontier;
+					frontier_level[i] = level + 1;
+					local_count++;
+					break;
+				}
+			}
 		}
-		next_queues[i]->clear();
 	}
+	*frontier_count = local_count;
 }
 
 void pbfs(int start_point/*, double* time_group, int group_num*/) {
@@ -260,53 +253,40 @@ void pbfs(int start_point/*, double* time_group, int group_num*/) {
 		time_group[i] = 0.0;
 	}
 	*/
-	//timer[0]->set_start_time();
-	node_parent.clear();
-	node_parent.reserve(N);
-	
-	visited.clear();
-	visited.reserve(N);
-	
-	merge_queue.clear();
-	merge_queue.push_back(start_point);
-	
+	//timer[0]->set_start_time();	
 	#pragma omp parallel
 	{
 		#pragma omp for nowait
 		for(int i = 0; i < N; i++) {
-			node_parent[i] = -1;
+			frontier_level[i] = 0;
 		}
 		#pragma omp for nowait
 		for(int i = 0; i < N; i++) {
-			visited[i] = false;
+			node_parent[i] = -1;
 		}
 	}
 	
 	node_parent[start_point] = start_point;
-	next_queue_size[0] = 1;
+	frontier_level[start_point] = 1;
 	/*timer[0]->set_end_time();
 	time_group[0] += timer[0]->get_time_interval();*/
+	int frontier_count = 1;
 	
-	while(next_queue_size[level-1] > 0) {
+	while(frontier_count > 0) {
 		//timer[1]->set_start_time();
-		find_next_queues_by_merge_queue(level);
+		if(frontier_count <= FRONTIER_LIMIT) {
+			top_down(level, &frontier_count);
+		}
+		else {
+			buttom_up(level, &frontier_count);
+		}
 		/*timer[1]->set_end_time();
 		time_group[1] += timer[1]->get_time_interval();*/
-		
-		//timer[2]->set_start_time();
-		record_next_queues_size(level);
-		/*timer[2]->set_end_time();
-		time_group[2] += timer[2]->get_time_interval();*/
-		
-		//timer[3]->set_start_time();
-		merge_to_merge_queue(level);
-		/*timer[3]->set_end_time();
-		time_group[3] += timer[3]->get_time_interval();*/
 		
 		level++;
 	}
 	
-	/*printf("BFS level %d\n",level);
+	/*printf("BFS level %d\n", level);
 	for(int i = 0; i < N; i++) {
 		printf("node: %d, parent: %d\n", i, node_parent[i]);
 	}*/
@@ -423,7 +403,7 @@ void output(int SCALE, int edgefactor, int NBFS, double kernel_1_time, double* k
 	sprintf(strch_SCALE, "%d", SCALE);
 	sprintf(strch_edgefactor, "%d", edgefactor);
 	std::string str_max_threads(strch_max_threads), str_SCALE(strch_SCALE), str_edgefactor(strch_edgefactor);
-	std::string file_name = "Test_OpenMP_" + str_max_threads + "threads_Kronecker/" + "SCALE=" + str_SCALE + "_edgefactor=" + str_edgefactor; // store in Test_OpenMP_Xthreads_Kronecker dir
+	std::string file_name = "Test_OpenMP_" + str_max_threads + "threads_Kronecker/" + "edgefactor=" + str_edgefactor + "_SCALE=" + str_SCALE; // store in Test_OpenMP_Xthreads_Kronecker dir
 	freopen(file_name.data(), "w", stdout);
 	
 	printf("SCALE: %d\n", SCALE);
@@ -502,13 +482,6 @@ void output(int SCALE, int edgefactor, int NBFS, double kernel_1_time, double* k
 			printf("in_deg[%6d] = %6d\n", i, in_deg[i]);
 	}
 	*/
-	/*
-	printf("\n");
-	for(int i = 0; i < N; i++) {
-		if(adjacency_list[i].size())
-			printf("adjacency_list[%6d].size = %6d\n", i, adjacency_list[i].size());
-	}
-	*/
 }
 
 int main(int argc, char *argv[]) {
@@ -544,7 +517,7 @@ int main(int argc, char *argv[]) {
 	rand_search_key.reserve(N);
 	randperm(N, rand_search_key);
 	for(int i = 0; i < N; i++) {
-		if(adjacency_list[rand_search_key[i]].size() > 0) {
+		if(in_deg[rand_search_key[i]] > 0) {
 			search_key.push_back(rand_search_key[i]);
 		}
 	}
