@@ -12,7 +12,7 @@
 #include <math.h>
 
 #define RAND_VAL_MAX 10000
-#define FRONTIER_LIMIT 1024
+//#define FRONTIER_COUNT_LIMIT 1024
 
 // Seed with a real random value, if available
 std::random_device r;
@@ -29,27 +29,35 @@ struct Edge {
 	int x, y;
 };
 std::vector<Edge> edge_list, tmp_edge_list; // x for start vertex, y for end vertex
-std::vector<int> in_deg;
+int *in_deg;
 std::vector<int> rand_search_key, search_key;
-std::vector<int> frontier_level;
+int *frontier_level;
 std::vector<std::vector<int> > adjacency_list;
-std::vector<int> index_into_adjacency_array, adjacency_array;
-std::vector<int> node_parent;
+int *index_into_adjacency_array, *adjacency_array;
+int *node_parent;
 
 int max_threads/* = omp_get_max_threads()*/;
+
+int *frontier_count_arr;
+int max_level;
+
+int FRONTIER_COUNT_LIMIT;
+double max_harmonic_mean_TEPS;
 
 void initialize() {
 	srand(time(NULL));
 	
 	omp_set_num_threads(max_threads);
 	
-	in_deg = std::vector<int> (N);
+	in_deg = new int [N]();
 	adjacency_list = std::vector<std::vector<int> > (N);
-	index_into_adjacency_array.reserve(N + 1);
-	adjacency_array.reserve(2 * M);	
+	index_into_adjacency_array = new int [N + 1];
+	adjacency_array = new int [2 * M];
 	
-	frontier_level.reserve(N);
-	node_parent.reserve(N);	
+	frontier_level = new int [N];
+	node_parent = new int [N];
+	
+	frontier_count_arr = new int [N];
 }
 
 void randperm(int n, std::vector<int> &perm) {
@@ -88,6 +96,14 @@ void cmp_gt(int len, const std::vector<double> &arr1, double value, std::vector<
 	}
 }
 
+int pow_2(int p) {
+	int val = 1;
+	for(int i = 0; i < p; i++) {
+		val *= 2;
+	}
+	return val;
+}
+
 void calculate_norm_arr(double c_norm, double a_norm) {
 	#pragma omp parallel for
 	for(int k = 0; k < M; k++) {
@@ -98,14 +114,14 @@ void calculate_norm_arr(double c_norm, double a_norm) {
 void sum_tmp_edge_list(int ib) {
 	#pragma omp parallel for
 	for(int k = 0; k < M; k++) {
-		tmp_edge_list[k].x += pow(2, (ib-1)) * ii_bit[k];
-		tmp_edge_list[k].y += pow(2, (ib-1)) * jj_bit[k];
+		tmp_edge_list[k].x += pow_2(ib - 1) * ii_bit[k];
+		tmp_edge_list[k].y += pow_2(ib - 1) * jj_bit[k];
 	}
 }
 
 void kronecker_generator(int SCALE, int edgefactor) {
 	// Set number of vertices.
-	N = pow(2, SCALE);
+	N = pow_2(SCALE);
 	
 	// Set number of edges.
 	M = edgefactor * N;
@@ -195,6 +211,10 @@ void construct_graph(bool flag_bidirection) {
 		}
 	}
 	
+	for(int i = 0; i < N; i++) {
+		std::sort(adjacency_list[i].begin(), adjacency_list[i].end());
+	}
+	
 	index_into_adjacency_array[0] = 0;
 	for(int i = 0; i < N; i++) {
 		index_into_adjacency_array[i + 1] = index_into_adjacency_array[i] + in_deg[i];
@@ -205,7 +225,6 @@ void construct_graph(bool flag_bidirection) {
 	std::vector<std::vector<int> > ().swap(adjacency_list);
 }
 
-/*** find next_queues elements, each thread maintain their own next queue, directly divide merge queue ***/
 void top_down(int level, int *frontier_count) {
 	int local_count = 0;
 	#pragma omp parallel for reduction(+ : local_count)
@@ -230,9 +249,9 @@ void buttom_up(int level, int *frontier_count) {
 	for(int i = 0; i < N; i++) {
 		if(frontier_level[i] == 0) {
 			for(int j = index_into_adjacency_array[i]; j < index_into_adjacency_array[i + 1]; j++) {
-				int frontier = adjacency_array[j];
-				if(frontier_level[frontier] == level) {
-					node_parent[i] = frontier;
+				int parent = adjacency_array[j];
+				if(frontier_level[parent] == level) {
+					node_parent[i] = parent;
 					frontier_level[i] = level + 1;
 					local_count++;
 					break;
@@ -243,17 +262,17 @@ void buttom_up(int level, int *frontier_count) {
 	*frontier_count = local_count;
 }
 
-void pbfs(int start_point/*, double* time_group, int group_num*/) {
+void pbfs(int start_point, int limit/*, double* time_group, int group_num*/) {
 	int level = 1;
 	/*
-	std::vector<Windows_Time*> timer.reserve(group_num);
-	
+	std::vector<Windows_Time*> timer;
+	timer.reserve(group_num);	
 	for(int i = 0; i < group_num; i++) {
 		timer[i] = new Windows_Time;
 		time_group[i] = 0.0;
 	}
 	*/
-	//timer[0]->set_start_time();	
+	//timer[0]->set_start_time();
 	#pragma omp parallel
 	{
 		#pragma omp for nowait
@@ -268,23 +287,26 @@ void pbfs(int start_point/*, double* time_group, int group_num*/) {
 	
 	node_parent[start_point] = start_point;
 	frontier_level[start_point] = 1;
-	/*timer[0]->set_end_time();
-	time_group[0] += timer[0]->get_time_interval();*/
+	//timer[0]->set_end_time();
+	//time_group[0] += timer[0]->get_time_interval();
 	int frontier_count = 1;
+	//frontier_count_arr[0] = 1;
 	
 	while(frontier_count > 0) {
 		//timer[1]->set_start_time();
-		if(frontier_count <= FRONTIER_LIMIT) {
+		if(frontier_count <= limit) {
 			top_down(level, &frontier_count);
 		}
 		else {
 			buttom_up(level, &frontier_count);
 		}
-		/*timer[1]->set_end_time();
-		time_group[1] += timer[1]->get_time_interval();*/
+		//timer[1]->set_end_time();
+		//time_group[1] += timer[1]->get_time_interval();
+		//frontier_count_arr[level] = frontier_count;
 		
 		level++;
 	}
+	//max_level = level;
 	
 	/*printf("BFS level %d\n", level);
 	for(int i = 0; i < N; i++) {
@@ -384,7 +406,7 @@ void statistics(double* value, int NBFS, double* result_info) {
 	mean = sum_of_value/NBFS;
 	double sum_of_value_mean_diff_square = 0;
 	for(int i = 0; i < NBFS; i++) {
-		sum_of_value_mean_diff_square += pow((value[i]-mean), 2);
+		sum_of_value_mean_diff_square += ((value[i]-mean) * (value[i]-mean));
 	}
 	stddev = sqrt((sum_of_value_mean_diff_square) / (NBFS-1));
 	
@@ -405,7 +427,7 @@ void output(int SCALE, int edgefactor, int NBFS, double kernel_1_time, double* k
 	std::string str_max_threads(strch_max_threads), str_SCALE(strch_SCALE), str_edgefactor(strch_edgefactor);
 	std::string file_name = "Test_OpenMP_" + str_max_threads + "threads_Kronecker/" + "edgefactor=" + str_edgefactor + "_SCALE=" + str_SCALE; // store in Test_OpenMP_Xthreads_Kronecker dir
 	freopen(file_name.data(), "w", stdout);
-	
+	/***
 	printf("SCALE: %d\n", SCALE);
 	printf("edgefactor: %d\n", edgefactor);
 	printf("NBFS: %d\n", NBFS);
@@ -458,9 +480,9 @@ void output(int SCALE, int edgefactor, int NBFS, double kernel_1_time, double* k
 	}
 	double sum_of_tmp_square = 0;
 	for(int i = 0; i < NBFS; i++) {
-		sum_of_tmp_square += pow(tmp[i], 2);
+		sum_of_tmp_square += (tmp[i] * tmp[i]);
 	}
-	S[6] = (sqrt(sum_of_tmp_square) / (NBFS-1)) * pow(S[5], 2);
+	S[6] = (sqrt(sum_of_tmp_square) / (NBFS-1)) * (S[5] * S[5]);
 	
 	printf("min_TEPS: %20.17e\n", S[0]);
 	printf("firstquartile_TEPS: %20.17e\n", S[1]);
@@ -482,6 +504,32 @@ void output(int SCALE, int edgefactor, int NBFS, double kernel_1_time, double* k
 			printf("in_deg[%6d] = %6d\n", i, in_deg[i]);
 	}
 	*/
+	/*
+	printf("\n");
+	for(int i = 0; i < max_level; i++) {
+		printf("level: %10d, count: %10d\n", i, frontier_count_arr[i]);
+	}
+	*/
+	
+	printf("\nFRONTIER_COUNT_LIMIT: %d, max_harmonic_mean_TEPS: %20.17e\n", FRONTIER_COUNT_LIMIT, max_harmonic_mean_TEPS);
+}
+
+int pow_10(int digit) {
+	int num = 1;
+	for(int i = 0; i < digit; i++) {
+		num *= 10;
+	}
+	return num;
+}
+
+int cal_digit(double n) {
+	int digit = 0;
+	double num = n;
+	while(num >= 10) {
+		num /= 10;
+		digit++;
+	}
+	return digit;
 }
 
 int main(int argc, char *argv[]) {
@@ -501,11 +549,6 @@ int main(int argc, char *argv[]) {
 	
 	kronecker_generator(SCALE, edgefactor);
 	
-	//read_edges();
-	//read_lists();
-	//read_graph();
-	//SCALE = log2(N);
-	//edgefactor = M/N;
 	bool flag_gen_edge_list = true;
 	
 	timer_kernel_1->set_start_time();
@@ -529,32 +572,60 @@ int main(int argc, char *argv[]) {
 		NBFS = search_key.size();
 	}
 	/*
-	int group_num = 4;
+	int group_num = 2;
 	double time_group[group_num], total_time_group[group_num] = {0.0};
 	*/
-	for(int i = 0; i < NBFS; i++) {
-		//printf("search key: %d\n", search_key[i]);		
-		timer_kernel_2->set_start_time();
-		pbfs(search_key[i]/*, time_group, group_num*/);	
-		timer_kernel_2->set_end_time();
-		kernel_2_time[i] = timer_kernel_2->get_time_interval();
-		//printf("kernel_2_time[%d]: %f\n", i, kernel_2_time[i]);
-		/*for(int j = 0; j < group_num; j++) {
-			total_time_group[j] += time_group[j];
-		}*/
-		
-		if(!validate(search_key[i])) {
-			printf("ERROR! round: %d, search key: %d\n", i, search_key[i]);
-			break;
+	max_harmonic_mean_TEPS = 0;
+	int diff_10 = 1;
+	for(int limit = 0; limit <= N; limit++) {
+		for(int i = 0; i < NBFS; i++) {
+			//printf("search key: %d\n", search_key[i]);
+			timer_kernel_2->set_start_time();
+			pbfs(search_key[i], limit/*, time_group, group_num*/);
+			timer_kernel_2->set_end_time();
+			kernel_2_time[i] = timer_kernel_2->get_time_interval();
+			//printf("kernel_2_time[%d]: %f\n", i, kernel_2_time[i]);
+			/*
+			for(int j = 0; j < group_num; j++) {
+				total_time_group[j] += time_group[j];
+			}
+			*/
+			if(!validate(search_key[i])) {
+				printf("ERROR! round: %d, search key: %d\n", i, search_key[i]);
+				break;
+			}
+			
+			kernel_2_nedge[i] = 0.0;
+			for(int j = 0; j < N; j++) {
+				if(node_parent[j] != -1) {
+					kernel_2_nedge[i] += in_deg[j];
+				}
+			}
+			kernel_2_nedge[i] /= 2;
 		}
 		
-		kernel_2_nedge[i] = 0.0;
-		for(int j = 0; j < N; j++) {
-			if(node_parent[j] != -1) {
-				kernel_2_nedge[i] += in_deg[j];
+		// calculate harmonic_mean_TEPS
+		double TEPS[NBFS], harmonic_mean_TEPS;
+		for(int i = 0; i < NBFS; i++) {
+			TEPS[i] = kernel_2_nedge[i] / kernel_2_time[i];
+		}
+		double sum_of_TEPS_reciprocal = 0;
+		for(int i = 0; i < NBFS; i++) {
+			if(TEPS[i] > 0) {
+				sum_of_TEPS_reciprocal += 1/TEPS[i];
 			}
 		}
-		kernel_2_nedge[i] /= 2;
+		harmonic_mean_TEPS = NBFS/sum_of_TEPS_reciprocal;
+		
+		// find BEST FRONTIER_COUNT_LIMIT
+		if(harmonic_mean_TEPS > max_harmonic_mean_TEPS) {
+			FRONTIER_COUNT_LIMIT = limit;
+			max_harmonic_mean_TEPS = harmonic_mean_TEPS;
+			diff_10 = pow_10(cal_digit(max_harmonic_mean_TEPS));
+		}
+		else if(max_harmonic_mean_TEPS - harmonic_mean_TEPS > diff_10) {
+			break;
+		}
 	}
 	
 	output(SCALE, edgefactor, NBFS, kernel_1_time, kernel_2_time, kernel_2_nedge/*, total_time_group, group_num*/);
